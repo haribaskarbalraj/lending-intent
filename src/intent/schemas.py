@@ -24,5 +24,12 @@ class IntentAnalysisResponse(BaseModel):
     financial_flags: list[str] = Field(
         description="Max 3 keywords summarizing the financial state (e.g., ['high_utilization', 'recent_relocation'])"
     )
-    recommended_product: str
-    propensity_score: float
+    recommended_product: str = Field(
+        description="Best product from: Personal Loan, Debt Consolidation Loan, Balance Transfer Credit Card, Auto Loan, Overdraft Line of Credit, None"
+    )
+    propensity_score: float = Field(
+        description="Lending propensity 0.00–1.00 (0.00–0.30 no need, 0.31–0.70 moderate, 0.71–1.00 high intent)"
+    )
+    pitch: str = Field(
+        description="One-sentence personalized sales pitch for the recommended product, addressed directly to the customer"
+    )

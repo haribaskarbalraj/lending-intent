@@ -1,64 +1,97 @@
-import json
 import logging
 
+from langchain_core.runnables import Runnable
+
 from src.core.exceptions import LLMException
+from src.intent.guardrails import ComplianceError, check_compliance
 from src.intent.schemas import IntentAnalysisResponse, SpendingRequest
-from src.llm.client import BaseLLMClient
+from src.rag.store import RAGStore
 
 logger = logging.getLogger(__name__)
 
 
 class IntentService:
-    """Business logic for lending intent analysis."""
+    """Business logic for lending intent analysis.
 
-    def __init__(self, llm: BaseLLMClient):
-        self.llm = llm
+    Full pipeline:
+        transactions → narrative → RAG enrich → LangChain chain → guardrails → response
+
+    Spring analogy: this is your @Service class. Its dependencies (chain, rag)
+    are injected via the constructor — equivalent to @Autowired constructor injection.
+    The router's get_intent_service() factory acts as the @Bean provider.
+    """
+
+    def __init__(self, chain: Runnable, rag: RAGStore) -> None:
+        self.chain = chain
+        self.rag = rag
 
     def analyse(self, request: SpendingRequest) -> IntentAnalysisResponse:
         logger.info("Analysing intent for %d transactions", len(request.transactions))
-        prompt = self._build_prompt(request)
-        logger.debug("Prompt sent to LLM:\n%s", prompt)
-        raw = self.llm.ask(prompt)
-        logger.debug("Raw response from LLM:\n%s", raw)
-        data = json.loads(self._strip_markdown(raw))
-        result = IntentAnalysisResponse(**data)
+
+        # Step 1: Build a human-readable narrative from raw transactions.
+        # Used for both embedding (RAG) and LLM prompting.
+        narrative = self.build_transaction_narrative(request)
+        logger.debug("Narrative:\n%s", narrative)
+
+        # Step 2: RAG — retrieve similar past converter narratives to enrich the prompt.
+        # If the store is empty (e.g. first run) this returns [] gracefully.
+        similar = self.rag.retrieve_similar(narrative)
+        similar_context = self._format_similar_context(similar)
+        logger.info("RAG: retrieved %d similar converter examples", len(similar))
+
+        # Step 3: LangChain chain — structured output, no manual JSON parsing.
+        # chain.invoke() returns a validated IntentAnalysisResponse directly.
+        try:
+            result: IntentAnalysisResponse = self.chain.invoke({
+                "narrative": narrative,
+                "similar_context": similar_context,
+            })
+        except Exception as e:
+            raise LLMException(f"LangChain chain failed: {e}") from e
+
+        # Step 4: Guardrails — compliance check before the result leaves the service.
+        try:
+            result = check_compliance(result)
+        except ComplianceError as e:
+            raise LLMException(f"Compliance violation: {e}") from e
+
         logger.info(
-            "Propensity score=%.2f recommended_product='%s'",
+            "score=%.2f product='%s' pitch='%s'",
             result.propensity_score,
             result.recommended_product,
+            result.pitch,
         )
         return result
 
-    def _strip_markdown(self, raw: str) -> str:
-        """Remove ```json ... ``` wrapper that LLMs sometimes add despite instructions."""
-        stripped = raw.strip()
-        if stripped.startswith("```"):
-            stripped = stripped.split("\n", 1)[-1]
-            stripped = stripped.rsplit("```", 1)[0]
-        return stripped.strip()
+    def build_transaction_narrative(self, request: SpendingRequest) -> str:
+        """Convert raw transactions into a human-readable paragraph.
 
-    def _build_prompt(self, req: SpendingRequest) -> str:
-        transactions_json = json.dumps(
-            [t.model_dump() for t in req.transactions], indent=2
+        This prose form is used for both LLM prompting and vector embedding.
+        LLMs and embedding models understand narrative text better than raw JSON.
+
+        Example output:
+            Customer 3-month transaction history:
+            2024-01-15: DEBIT $45.00 at Starbucks
+            2024-01-16: CREDIT $2500.00 at Employer Payroll
+        """
+        lines = [
+            f"{t.date}: {t.transaction_type.upper()} ${abs(t.amount):.2f} "
+            f"at {t.merchant_description}"
+            for t in request.transactions
+        ]
+        return "Customer 3-month transaction history:\n" + "\n".join(lines)
+
+    def _format_similar_context(self, similar: list[str]) -> str:
+        """Format RAG results into a prompt-ready context block.
+
+        Returns an empty string when no examples exist —
+        the system prompt handles the missing placeholder gracefully.
+        """
+        if not similar:
+            return ""
+        examples = "\n---\n".join(similar)
+        return (
+            f"\nFor context, here are {len(similar)} similar customers "
+            f"who converted to a lending product — use these as soft reference:\n"
+            f"{examples}\n"
         )
-        return f"""You are a credit risk analyst. Analyze the customer's 60-day transaction history and predict lending intent.
-
-<analysis_instructions>
-1. Identify financial stress signals, life events, or debt consolidation patterns.
-2. Choose up to 3 keyword flags that best summarize the customer's financial state (e.g., high_utilization, recent_relocation, min_payment_pattern).
-3. Recommend the single best product from: ["Personal Loan", "Debt Consolidation Loan", "Balance Transfer Credit Card", "Auto Loan", "Overdraft Line of Credit", "None"].
-4. Score lending propensity 0.00–1.00 (0.00–0.30 no need, 0.31–0.70 moderate, 0.71–1.00 high intent).
-</analysis_instructions>
-
-<output_format>
-Respond ONLY with a valid JSON object — no markdown, no explanation:
-{{
-  "financial_flags": ["flag1", "flag2"],
-  "recommended_product": "Product Name",
-  "propensity_score": 0.00
-}}
-</output_format>
-
-<transactions>
-{transactions_json}
-</transactions>"""
