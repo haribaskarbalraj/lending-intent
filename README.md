@@ -102,3 +102,4 @@ See [docs/architecture.md](docs/architecture.md) for the full system design.
 
 - [ADR-001: Dual-environment LLM and RAG backends](docs/adr/001-dual-env-llm-rag.md)
 - [ADR-002: Hybrid RAG + LLM recommendation approach](docs/adr/002-hybrid-rag-approach.md)
+- [ADR-003: Multi-agent architecture for post-scoring actions](docs/adr/003-multi-agent-architecture.md)

@@ -58,9 +58,30 @@ The threshold for switching to Phase 2 is a business decision based on: number o
 - Requires a decision threshold and A/B testing infrastructure to trigger Phase 2
 - Similarity-based propensity score (cosine distance) needs calibration against actual conversion rates to be meaningful
 
+## Correct RAG Store Trigger
+
+Storing after **loan acceptance** is the wrong trigger for this use case. The engine's job is proactive solicitation — by the time a loan is accepted, the recommendation decision is already done.
+
+The correct event funnel:
+
+```
+Card activity observed
+        ↓
+Solicitation sent (invitation ID generated)   ← store here
+        ↓
+Customer engaged / clicked offer              ← update metadata
+        ↓
+Customer applied                              ← update metadata (strong signal)
+        ↓
+Customer accepted                             ← outcome only, too late for RAG
+```
+
+The RAG store learns: *"this card spending pattern, solicited with this product, led to an application."* That is the signal that improves future recommendations.
+
 ## What Needs to Be Built
 
-1. Wire `rag.store(narrative, customer_id, metadata)` into `IntentService.analyse()` after guardrails pass
+1. Wire `rag.store(narrative, customer_id, metadata)` into the Invitation Agent — store at solicitation time, not in `IntentService.analyse()`
 2. Add `customer_id` to `SpendingRequest` so stored narratives are identifiable
 3. Add `retrieve_similar_with_metadata()` to `RAGStore` — current `retrieve_similar()` returns text only, not the associated product metadata
-4. Implement the Phase 2 routing logic with a feature flag or config threshold
+4. Add `POST /intent/feedback` endpoint to accept `{ invitation_id, applied: true }` from CRM and update the RAG entry
+5. Implement the Phase 2 routing logic with a feature flag or config threshold

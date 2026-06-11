@@ -2,9 +2,54 @@
 
 ## System Purpose
 
-The Lending Intent Engine is a GenAI classification service. It ingests raw customer transaction data and outputs a structured lending recommendation enriched by historical conversion patterns via RAG (Retrieval Augmented Generation).
+The Lending Intent Engine is a GenAI classification service built for **proactive customer solicitation**. It analyses the spending patterns of existing credit card customers and identifies who should be targeted with a lending product offer — before they come looking for a loan.
 
-## Request Pipeline
+The engine does not wait for a customer to apply. It watches card activity, scores lending intent, and when the propensity crosses a threshold it triggers downstream agents to generate an invitation and send a personalised offer.
+
+## Full System Flow
+
+```
+Card Activity Feed (batch / real-time)
+        │
+        ▼
+┌───────────────────────────────────────┐
+│        Lending Intent Engine          │  ← Orchestrator Agent
+│                                       │
+│  1. build_narrative()                 │  raw transactions → prose
+│  2. RAG retrieve_similar()            │  find past solicitation patterns
+│  3. LangChain chain.invoke()          │  LLM scores intent
+│  4. Compliance guardrails             │  product + score + flag checks
+│                                       │
+│  propensity_score >= threshold?       │
+└──────────────┬────────────────────────┘
+               │ YES
+               ▼
+    ┌──────────┴──────────┐
+    │                     │
+    ▼                     ▼
+┌───────────────┐   ┌─────────────────────┐
+│  Invitation   │   │  Communication      │
+│    Agent      │   │      Agent          │
+│               │   │                     │
+│ - gen INV ID  │   │ - LLM: write email  │
+│ - write CRM   │   │   body from pitch   │
+│ - return ID   │   │ - send email to     │
+└───────┬───────┘   │   customer          │
+        │           └─────────────────────┘
+        ▼
+┌───────────────┐
+│  RAG Store    │  store(narrative, customer_id, { product, score, invitation_id })
+│  store()      │  ← stored at solicitation time, NOT after loan acceptance
+└───────────────┘
+        │
+        ▼  (async — when customer responds)
+┌───────────────┐
+│ Feedback loop │  POST /intent/feedback { invitation_id, applied: true }
+│               │  → update RAG entry → confirmed signal for future customers
+└───────────────┘
+```
+
+## Scoring Pipeline (inside the Orchestrator)
 
 ```
 POST /intent/analyse
@@ -20,13 +65,11 @@ POST /intent/analyse
 │                     │  (LLMs understand narrative better than raw JSON)
 └─────────────────────┘
         │
-        ├──────────────────────────────────────┐
-        ▼                                      ▼
-┌──────────────────┐                ┌────────────────────┐
-│  RAG retrieve    │                │  (future) RAG store │
-│  similar past    │                │  narrative after    │
-│  converters      │                │  conversion         │
-└──────────────────┘                └────────────────────┘
+        ▼
+┌──────────────────────┐
+│  RAG retrieve        │  embed narrative → find top-N similar past
+│  retrieve_similar()  │  solicitation patterns from vector store
+└──────────────────────┘
         │
         ▼
 ┌─────────────────────┐
@@ -41,13 +84,14 @@ POST /intent/analyse
 └─────────────────────┘
         │
         ▼
-┌─────────────────────┐
-│ IntentAnalysisResponse │
-│  financial_flags    │
-│  recommended_product│
-│  propensity_score   │
-│  pitch              │
-└─────────────────────┘
+┌──────────────────────────┐
+│  IntentAnalysisResponse  │
+│  financial_flags         │
+│  recommended_product     │
+│  propensity_score        │
+│  pitch                   │
+│  invitation_id (future)  │
+└──────────────────────────┘
 ```
 
 ## Component Map
@@ -69,6 +113,14 @@ lending-intent/
 │   │   ├── service.py         IntentService — orchestrates the full pipeline
 │   │   ├── guardrails.py      Compliance validation (post-LLM)
 │   │   └── router.py          FastAPI route: POST /intent/analyse
+│   ├── invitation/            (planned) Invitation Agent
+│   │   ├── schemas.py         InvitationRequest, InvitationResponse
+│   │   ├── service.py         generate ID, write to CRM/DB
+│   │   └── router.py          POST /invitation/create
+│   ├── communication/         (planned) Communication Agent
+│   │   ├── schemas.py         EmailRequest, EmailResponse
+│   │   ├── service.py         LLM email body generation + send
+│   │   └── router.py          POST /communication/send
 │   └── health/
 │       └── router.py          GET /health
 ```
@@ -118,9 +170,21 @@ New customer arrives:
   → inject into LLM prompt as context examples
 ```
 
+### What Gets Stored and When
+
+The correct trigger for storing a pattern is **when a solicitation is sent**, not when a loan is accepted. By the time a loan is accepted the recommendation decision is already made — storing at that point teaches the wrong lesson.
+
+```
+Solicitation sent  → store immediately (baseline signal)
+Customer applied   → update metadata: applied=true (strong signal)
+Customer accepted  → outcome data only, decision already made
+```
+
+This means the RAG store learns: *"this spending pattern, when solicited with this product, resulted in a customer applying"* — which is exactly the signal needed for future recommendations.
+
 ### Current State
 
-The RAG store `retrieve_similar()` is wired up and called on every request. However, `store()` is not yet called after a successful analysis. The store is always empty — the LLM runs on raw transactions only. See [ADR-002](adr/002-hybrid-rag-approach.md) for the planned hybrid approach.
+The RAG store `retrieve_similar()` is wired up and called on every request. However, `store()` is not yet called — the store is always empty and the LLM runs on raw transactions only. See [ADR-002](adr/002-hybrid-rag-approach.md) for the planned hybrid approach and [ADR-003](adr/003-multi-agent-architecture.md) for the downstream agent design.
 
 ## Guardrails
 
