@@ -1,6 +1,6 @@
 # Lending Intent Engine
 
-A GenAI application that analyses customer transaction history and classifies lending intent using AWS Bedrock (Claude) and a RAG-enriched LangChain pipeline.
+A GenAI application that analyses customer transaction history and classifies lending intent using an agentic LangGraph workflow, Amazon Bedrock (Claude), and RAG-enriched retrieval — deployed behind AWS Bedrock Guardrails for production safety.
 
 ## What it does
 
